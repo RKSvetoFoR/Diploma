@@ -1,0 +1,604 @@
+const int nMat = 4;
+const double P0 = 1.01325E+5;
+const double temp0 = 900.0;
+const double temp_in = 1000.0;
+const double gR = 8.314472;	
+const double u_g = 0.1;
+const int n_TCP = 4;
+void calc_h(double& tmp,
+	double* hii, double* k_TCP1, double* k_TCP2, double* k_TCP3, double* k_TCP4, double* h0)
+{
+	double TRef = 298.15;
+	double t1, t2;
+	for (int iM = 0; iM < nMat; iM++) {
+		hii[iM] = h0[iM];
+		for (int i = 0; i < n_TCP; i++) {
+			int q = i + 1;
+			t2 = exp((q)*log(tmp)) / (q);
+			t1 = exp((q)*log(TRef)) / (q);
+			hii[0] += k_TCP1[i] * (t2 - t1);
+			hii[1] += k_TCP2[i] * (t2 - t1);
+			hii[2] += k_TCP3[i] * (t2 - t1);
+			hii[3] += k_TCP4[i] * (t2 - t1);
+		}
+	}
+}
+//urs[0] = tmp, urs[1] = gamma, urs[2] = r, urs[3] = h_, urs[4] = fM, urs[5] = tmp1, urs[6] = Cv, urs[7] = Cp
+double Calc_CP(double* y, double fT, double* k_TCP1, double* k_TCP2, double* k_TCP3, double* k_TCP4)
+{
+	double fTP = fT, fCP = k_TCP1[0], res = 0;
+	for (int i = 1; i < n_TCP; i++) {
+		fCP += fTP * k_TCP1[i];
+		fTP *= fT;
+	}
+	res += y[0] * fCP;
+
+	fTP = fT, fCP = k_TCP2[0];
+	for (int i = 1; i < n_TCP; i++) {
+		fCP += fTP * k_TCP2[i];
+		fTP *= fT;
+	}
+	res += y[1] * fCP;
+
+	fTP = fT, fCP = k_TCP3[0];
+	for (int i = 1; i < n_TCP; i++) {
+		fCP += fTP * k_TCP3[i];
+		fTP *= fT;
+	}
+	res += y[2] * fCP;
+
+	fTP = fT, fCP = k_TCP4[0];
+	for (int i = 1; i < n_TCP; i++) {
+		fCP += fTP * k_TCP4[i];
+		fTP *= fT;
+	}
+	res += y[3] * fCP;
+	return res;
+}
+void Newton_Method(double e, double* y_m, double tmp1,
+	double& tmp, double* k_TCP1, double* k_TCP2, double* k_TCP3, double* k_TCP4, double* Mm, double* h0, double* hii)
+{
+	double fT = tmp1;
+	double fE = e;
+
+	double fM = 0.0;
+	for (int i = 0; i < nMat; i++) fM += y_m[i] / Mm[i];
+	double fR_M = gR * fM;
+	fR_M = 0.0;
+
+	for (int ic = 0; ic < 100; ic++)
+	{
+		double fCP = 0.0;
+		double fCP_ = 0.0;
+		calc_h(fT, hii, k_TCP1, k_TCP2, k_TCP3, k_TCP4, h0);
+
+		for (int i = 0; i < nMat; i++)
+		{
+			fCP += y_m[i] * hii[i];
+		}
+		fCP_ += Calc_CP(y_m, fT, k_TCP1, k_TCP2, k_TCP3, k_TCP4);
+
+		double fFT = fCP - fE;
+		double fFT_ = fCP_;
+
+		double fTg = fT - fFT / fFT_;
+		if ((fTg - fT) * (fTg - fT) < 1.0e-10) { fT = fTg; break; }
+		fT = fTg;
+	}
+	tmp = fT;
+}
+void urs_mixt(double* y_m, double h, double p, double fT, int flag,
+	double& tmp, double& gamma, double& r, double& h_, double* k_TCP1, double* k_TCP2, double* k_TCP3, double* k_TCP4, double* Mm, double* h0, double* hii) {
+	double Cv, Cp, e;
+	double fM = 0.0;
+	tmp = fT;
+	double tmp1 = fT;
+	for (int iM = 0; iM < nMat; iM++) fM += y_m[iM] / Mm[iM];
+
+	if (flag == 1) {
+		Newton_Method(h, y_m, tmp1,
+			tmp, k_TCP1, k_TCP2, k_TCP3, k_TCP4, Mm, h0, hii);
+	}
+
+	double fCP = 0.0;
+
+	fCP += Calc_CP(y_m, tmp, k_TCP1, k_TCP2, k_TCP3, k_TCP4);
+
+	Cp = fCP;
+	Cv = Cp - gR * fM;
+	gamma = Cp / Cv;
+
+	switch (flag)
+	{
+	case 2:
+		calc_h(tmp, hii, k_TCP1, k_TCP2, k_TCP3, k_TCP4, h0);
+		h_ = 0.0;
+		for (int iM = 0; iM < nMat; iM++) {
+			h_ += y_m[iM] * hii[iM];
+		}
+		r = P0 / (gR * tmp * fM);
+		break;
+	}
+}
+__kernel void bnd_cond(__global double* u,
+	__global double* ro,
+	__global double* rh,
+	__global double* pi,
+	__global double* temp,
+	__global double* ry1,
+	__global double* ry2,
+	__global double* ry3,
+	__global double* ry4,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* Mm,
+	__global double* h0,
+	__global double* hii,
+	const int N) {
+	double r, p, h_, tmp, gamma;
+	temp[0] = temp_in;
+	double p_g = P0 + pi[1];
+	urs_mixt({ new double[4] {0.25, 0.25, 0.25, 0.25} }, 0.0, P0, temp[0], 2,
+		tmp, gamma, r, h_, k_TCP1, k_TCP2, k_TCP3, k_TCP4, Mm, h0, hii);
+
+	ro[0] = r;
+	u[0] = u_g;
+	pi[0] = p_g - P0;
+	rh[0] = r * h_;
+	ry1[0] = r * 0.25;
+	ry2[0] = r * 0.25;
+	ry3[0] = r * 0.25;
+	ry4[0] = r * 0.25;
+
+	ro[N + 1] = ro[N];
+	u[N + 1] = u[N];
+	rh[N + 1] = rh[N];
+	temp[N + 1] = temp[N];
+	pi[N + 1] = 0.;
+	ry1[N + 1] = ry1[N];
+	ry2[N + 1] = ry2[N];
+	ry3[N + 1] = ry3[N];
+	ry4[N + 1] = ry4[N];
+}
+
+
+	//cl::Kernel bnd_cond(program, "bnd_cond");
+
+	//cl::Buffer buffer_k_TCP1(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_k_TCP2(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_k_TCP3(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_k_TCP4(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_Mm(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_h0(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	//cl::Buffer buffer_hii(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+
+	//queue.enqueueWriteBuffer(buffer_k_TCP1, CL_TRUE, 0, sizeof(double) * (n_TCP), k_TCP[0]);
+	//queue.enqueueWriteBuffer(buffer_k_TCP2, CL_TRUE, 0, sizeof(double) * (n_TCP), k_TCP[1]);
+	//queue.enqueueWriteBuffer(buffer_k_TCP3, CL_TRUE, 0, sizeof(double) * (n_TCP), k_TCP[2]);
+	//queue.enqueueWriteBuffer(buffer_k_TCP4, CL_TRUE, 0, sizeof(double) * (n_TCP), k_TCP[3]);
+	//queue.enqueueWriteBuffer(buffer_Mm, CL_TRUE, 0, sizeof(double) * (n_TCP), Mm);
+	//queue.enqueueWriteBuffer(buffer_h0, CL_TRUE, 0, sizeof(double) * (n_TCP), h0);
+	//queue.enqueueWriteBuffer(buffer_hii, CL_TRUE, 0, sizeof(double) * (n_TCP), hii);
+
+	/*bnd_cond.setArg(0, buffer_u);
+	bnd_cond.setArg(1, buffer_ro);
+	bnd_cond.setArg(2, buffer_rh);
+	bnd_cond.setArg(3, buffer_pi);
+	bnd_cond.setArg(4, buffer_temp);
+	bnd_cond.setArg(5, buffer_ry1);
+	bnd_cond.setArg(6, buffer_ry2);
+	bnd_cond.setArg(7, buffer_ry3);
+	bnd_cond.setArg(8, buffer_ry4);
+	bnd_cond.setArg(9, buffer_Mm);
+	bnd_cond.setArg(10, buffer_h0);
+	bnd_cond.setArg(11, buffer_hii);
+	bnd_cond.setArg(12, N);*/
+
+
+	//уравнение состояния для многокомпонентного идеального газа
+void urs_mixt_OC(double* y_m, double h, double p, double fT, int flag, cl::Buffer buffer_y_m,
+	 cl::Kernel calc_urs1, cl::Kernel calc_urs2, cl::Kernel calc_urs3, cl::Kernel calc_Newton, cl::CommandQueue queue)
+{
+	queue.enqueueReadBuffer(buffer_y_m, CL_TRUE, 0, sizeof(double) * nMat, y_m);
+
+	calc_urs1.setArg(7, buffer_y_m);
+	calc_urs1.setArg(8, h);
+	calc_urs1.setArg(9, fT);
+
+	calc_urs2.setArg(7, buffer_y_m);
+
+	calc_urs3.setArg(7, buffer_y_m);
+
+	queue.enqueueNDRangeKernel(calc_urs1, cl::NullRange, cl::NDRange(N + 2), cl::NullRange);
+	
+	// вычисляем Т итерациями по Ньютону
+	if (flag == 1) {
+		Newton_Method_OC(h, y_m, buffer_y_m, calc_Newton, queue);
+	}
+	
+	queue.enqueueNDRangeKernel(calc_urs2, cl::NullRange, cl::NDRange(N + 2), cl::NullRange);
+
+	switch (flag)
+	{
+	case 2:		
+		queue.enqueueNDRangeKernel(calc_urs3, cl::NullRange, cl::NDRange(N + 2), cl::NullRange);
+		break;
+	}
+}
+
+
+void Newton_Method_OC(double e, double* y_m, cl::Buffer buffer_y_m, cl::Kernel calc_Newton, cl::CommandQueue queue)
+{
+	calc_Newton.setArg(8, buffer_y_m);
+	calc_Newton.setArg(9, e);
+
+	queue.enqueueNDRangeKernel(calc_Newton, cl::NullRange, cl::NDRange(N + 2), cl::NullRange);
+}
+
+void bnd_cond_OC(cl::CommandQueue queue, cl::Buffer buffer_u, cl::Buffer buffer_ro, cl::Buffer buffer_rh, cl::Buffer buffer_pi,
+	cl::Buffer buffer_temp, cl::Buffer buffer_ry1, cl::Buffer buffer_ry2, cl::Buffer buffer_ry3,
+	cl::Buffer buffer_ry4, cl::Buffer buffer_urs, cl::Buffer buffer_y_m, cl::Kernel calc_urs1, cl::Kernel calc_urs2, cl::Kernel calc_urs3, cl::Kernel calc_Newton, cl::Kernel bnd_cond);
+/**
+ * Уравнение состояния смеси идеальных газов для OpenCL
+ * urs[0] = tmp, urs[1] = gamma, urs[2] = r, urs[3] = h_, urs[4] = fM, urs[5] = tmp1, urs[6] = Cv, urs[7] = Cp
+ */
+void urs_mixt_OC(double* y_m, double h, double p, double fT, int flag, cl::Buffer buffer_y_m,
+	cl::Kernel calc_urs1, cl::Kernel calc_urs2, cl::Kernel calc_urs3, cl::Kernel calc_Newton, cl::CommandQueue queue);
+	/**
+ * Вычисление температуры итерациями по Ньютону для OpenCL
+ */
+void Newton_Method_OC(double e, double* y_m, cl::Buffer buffer_y_m, cl::Kernel calc_Newton, cl::CommandQueue queue);
+
+__kernel void calc_urs1(__global double* Mm,
+	__global double* hii,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* y_m,
+	const double h,
+	const double fT) {
+	int iM = get_global_id(0);
+	const int nMat = 4;
+	if (iM == 0) {
+		urs[4] = 0.0;
+		urs[0] = fT;
+		urs[5] = fT;
+		for (int i = 0; i < nMat; i++) {
+			urs[4] += y_m[i] / Mm[i];
+		}
+	}
+}
+
+__kernel void calc_urs2(__global double* Mm,
+	__global double* hii,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* y_m) {
+
+	int iM = get_global_id(0);
+	const double gR = 8.314472;
+	if (iM == 0) {
+		double fCP = 0.0;
+		fCP += Calc_CP(y_m, urs[0], k_TCP1, k_TCP2, k_TCP3, k_TCP4);
+		urs[7] = fCP;
+		urs[6] = urs[7] - gR * urs[4];
+		urs[1] = urs[7] / urs[6];
+	}
+}
+__kernel void calc_urs3(__global double* hii,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* h0,
+	__global double* y_m) {
+
+	int iM = get_global_id(0);
+	const double P0 = 1.01325E+5;
+	const double gR = 8.314472;
+	double TRef = 298.15;
+	const int nMat = 4;
+	const int n_TCP = 4;
+	double t1, t2;
+	if (iM == 0) {
+		for (int ic = 0; ic < nMat; iM++) {
+			hii[ic] = h0[ic];
+			for (int j = 0; j < n_TCP; j++) {
+				int q = j + 1;
+				t2 = exp((q)*log(urs[0])) / (q);
+				t1 = exp((q)*log(TRef)) / (q);
+				hii[0] += k_TCP1[j] * (t2 - t1);
+				hii[1] += k_TCP2[j] * (t2 - t1);
+				hii[2] += k_TCP3[j] * (t2 - t1);
+				hii[3] += k_TCP4[j] * (t2 - t1);
+			}
+		}
+		urs[3] = 0.0;
+		for (int i = 0; i < nMat; i++) { 
+			urs[3] += y_m[i] * hii[i]; 
+		}
+		urs[2] = P0 / (gR * urs[0] * urs[4]);
+	}
+}
+__kernel void calc_Newton(__global double* hii,
+	__global double* Mm,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* h0,
+	__global double* y_m,
+	const double e) {
+
+	int iM = get_global_id(0);
+	const double P0 = 1.01325E+5;
+	const double gR = 8.314472;
+	double TRef = 298.15;
+	const int nMat = 4;
+	const int n_TCP = 4;
+	double t1, t2;
+	if (iM == 0) {
+		double fT = urs[5];
+		double fE = e;
+		double fM = 0.0; 
+		for (int i = 0; i < nMat; i++) {
+			fM += y_m[i] / Mm[i];
+		}
+		double fR_M = gR * fM;
+		fR_M = 0.0;
+		for (int ic = 0; ic < 100; ic++)
+		{
+			double fCP = 0.0;
+			double fCP_ = 0.0;
+			for (int ix = 0; ix < nMat; iM++) {
+				hii[ix] = h0[ix];
+				for (int j = 0; j < n_TCP; j++) {
+					int q = j + 1;
+					t2 = exp((q)*log(fT)) / (q);
+					t1 = exp((q)*log(TRef)) / (q);
+					hii[0] += k_TCP1[j] * (t2 - t1);
+					hii[1] += k_TCP2[j] * (t2 - t1);
+					hii[2] += k_TCP3[j] * (t2 - t1);
+					hii[3] += k_TCP4[j] * (t2 - t1);
+				}
+			}
+			for (int i = 0; i < nMat; i++)
+			{
+				fCP += y_m[i] * hii[i];
+			}
+
+			fCP_ += Calc_CP(y_m, fT, k_TCP1, k_TCP2, k_TCP3, k_TCP4);
+
+			double fFT = fCP - fE;
+			double fFT_ = fCP_;
+
+			double fTg = fT - fFT / fFT_;
+			if ((fTg - fT) * (fTg - fT) < 1.0e-10) { fT = fTg; break; }
+			fT = fTg;
+		}
+		urs[0] = fT;
+	}
+}
+	
+	cl::Buffer buffer_h0(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+	cl::Buffer buffer_hii(context, CL_MEM_READ_WRITE, sizeof(double) * (n_TCP));
+
+	cl::Buffer buffer_y_m(context, CL_MEM_READ_WRITE, sizeof(double) * (nMat));
+
+
+	queue.enqueueWriteBuffer(buffer_h0, CL_TRUE, 0, sizeof(double) * (n_TCP), h0);
+	queue.enqueueWriteBuffer(buffer_hii, CL_TRUE, 0, sizeof(double) * (n_TCP), hii);
+
+	queue.enqueueWriteBuffer(buffer_y_m, CL_TRUE, 0, sizeof(double)* (nMat), y_m);
+
+		calc_urs1.setArg(0, buffer_Mm);
+	calc_urs1.setArg(1, buffer_hii);
+	calc_urs1.setArg(2, buffer_urs);
+	calc_urs1.setArg(3, buffer_k_TCP1);
+	calc_urs1.setArg(4, buffer_k_TCP2);
+	calc_urs1.setArg(5, buffer_k_TCP3);
+	calc_urs1.setArg(6, buffer_k_TCP4);
+
+	calc_urs2.setArg(0, buffer_Mm);
+	calc_urs2.setArg(1, buffer_hii);
+	calc_urs2.setArg(2, buffer_urs);
+	calc_urs2.setArg(3, buffer_k_TCP1);
+	calc_urs2.setArg(4, buffer_k_TCP2);
+	calc_urs2.setArg(5, buffer_k_TCP3);
+	calc_urs2.setArg(6, buffer_k_TCP4);
+
+	calc_urs3.setArg(0, buffer_hii);
+	calc_urs3.setArg(1, buffer_urs);
+	calc_urs3.setArg(2, buffer_k_TCP1);
+	calc_urs3.setArg(3, buffer_k_TCP2);
+	calc_urs3.setArg(4, buffer_k_TCP3);
+	calc_urs3.setArg(5, buffer_k_TCP4);
+	calc_urs3.setArg(6, buffer_h0);
+
+	calc_Newton.setArg(0, buffer_hii);
+	calc_Newton.setArg(1, buffer_Mm);
+	calc_Newton.setArg(2, buffer_urs);
+	calc_Newton.setArg(3, buffer_k_TCP1);
+	calc_Newton.setArg(4, buffer_k_TCP2);
+	calc_Newton.setArg(5, buffer_k_TCP3);
+	calc_Newton.setArg(6, buffer_k_TCP4);
+	calc_Newton.setArg(7, buffer_h0);
+
+	cl::Kernel calc_urs1(program, "calc_urs1");
+	cl::Kernel calc_urs2(program, "calc_urs2");
+	cl::Kernel calc_urs3(program, "calc_urs3");
+	cl::Kernel calc_Newton(program, "calc_Newton");
+
+	//bnd_cond.setArg(0, buffer_u);
+	//bnd_cond.setArg(1, buffer_ro);
+	//bnd_cond.setArg(2, buffer_rh);
+	//bnd_cond.setArg(3, buffer_pi);
+	//bnd_cond.setArg(4, buffer_temp);
+	//bnd_cond.setArg(5, buffer_ry1);
+	//bnd_cond.setArg(6, buffer_ry2);
+	//bnd_cond.setArg(7, buffer_ry3);
+	//bnd_cond.setArg(8, buffer_ry4);
+	//bnd_cond.setArg(9, buffer_urs);
+	//bnd_cond.setArg(10, N);
+
+	__kernel void calc_pi1(__global double* pi,
+	__global double* pi_int,
+	const int N) {
+	int i = get_global_id(0);
+
+	if ((i >= 1) && (i <= N)) {
+		pi_int[i] = pi[i];
+	}
+}
+__kernel void calc_pi(__global double* u,
+	__global double* ro,
+	__global double* pi,
+	__global double* S,
+	const int N,
+	const double DT,
+	const double H) {
+
+	int iM = get_global_id(0);
+	if (iM == 0) {
+
+		for (int i = 1; i <= N; i++) {
+			pi[i] = 0.5 * (pi[i - 1] + pi[i + 1] - H * H * ro[i] * (0.5 * (u[i + 1] - u[i - 1]) / H - S[i]) / (DT));
+
+		}
+	}
+
+}
+	calc_pi.setArg(0, buffer_u);
+	calc_pi.setArg(1, buffer_ro);
+	calc_pi.setArg(2, buffer_pi);
+	calc_pi.setArg(3, buffer_S);
+	calc_pi.setArg(4, N);
+	calc_pi.setArg(5, DT);
+	calc_pi.setArg(6, H);
+
+		
+		
+
+
+	__global double* yl,
+	__global double* yr,
+	__global double* Mm,
+	const int N,
+	const double H
+
+		yl[0] = ry1[i - 1] / ro[i - 1];
+		yl[1] = ry2[i - 1] / ro[i - 1];
+		yl[2] = ry3[i - 1] / ro[i - 1];
+		yl[3] = ry4[i - 1] / ro[i - 1];
+
+		yr[0] = ry1[i + 1] / ro[i + 1];
+		yr[1] = ry2[i + 1] / ro[i + 1];
+		yr[2] = ry3[i + 1] / ro[i + 1];
+		yr[3] = ry4[i + 1] / ro[i + 1];
+
+		barrier(CLK_GLOBAL_MEM_FENCE);
+
+		ry1_int[i + 1] += fry1;
+		ry2_int[i + 1] += fry2;
+		ry3_int[i + 1] += fry3;
+		ry4_int[i + 1] += fry4;
+		u_intt[i + 1] += fu;
+		rh_int[i + 1] += fh;
+
+		barrier(CLK_GLOBAL_MEM_FENCE);
+
+		double QF = 0.5 * (Calc_KP_Nv(yr, Mm, tempr) + Calc_KP_Nv(yl, Mm, templ)) * (tempr - templ) / H;
+		rh_int[i] += QF;
+		rh_int[i + 1] -= QF;
+
+		__kernel void calc_urs2(__global double* Mm,
+	__global double* hii,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* y_m,
+	const double gR) {
+
+	int iM = get_global_id(0);
+	if (iM == 0) {
+		double fCP = 0.0;
+		fCP += Calc_CP(y_m, urs[0], k_TCP1, k_TCP2, k_TCP3, k_TCP4);
+		urs[7] = fCP;
+		urs[6] = urs[7] - gR * urs[4];
+		urs[1] = urs[7] / urs[6];
+	}
+}
+__kernel void calc_urs3(__global double* hii,
+	__global double* urs,
+	__global double* k_TCP1,
+	__global double* k_TCP2,
+	__global double* k_TCP3,
+	__global double* k_TCP4,
+	__global double* h0,
+	__global double* y_m,
+	const double P0,
+	const double gR,
+	const int nMat,
+	const int n_TCP) {
+
+	int iM = get_global_id(0);
+	
+	if (iM == 0) {
+		double TRef = 298.15;
+		double t1, t2;
+		hii[0] = h0[0];
+		hii[1] = h0[1];
+		hii[2] = h0[2];
+		hii[3] = h0[3];
+
+		for (int j = 0; j < n_TCP; j++) {
+			int q = j + 1;
+			t2 = exp((q)*log(urs[0])) / (q);
+			t1 = exp((q)*log(TRef)) / (q);
+			hii[0] += k_TCP1[j] * (t2 - t1);
+			hii[1] += k_TCP2[j] * (t2 - t1);
+			hii[2] += k_TCP3[j] * (t2 - t1);
+			hii[3] += k_TCP4[j] * (t2 - t1);
+		}
+
+		urs[3] = 0.0;
+
+		for (int i = 0; i < nMat; i++) {
+
+			urs[3] += 0.25 * hii[i];
+		}
+		urs[2] = P0 / (gR * urs[0] * urs[4]);
+	}
+}
+	cl::Kernel calc_urs2(program, "calc_urs2");
+	cl::Kernel calc_urs3(program, "calc_urs3");
+
+	void urs_mixt_OC(double* y_m, double h, double p, double fT, int flag, cl::Buffer buffer_y_m, cl::Buffer buffer_urs,
+	cl::Kernel calc_urs1, cl::Kernel calc_urs2, cl::Kernel calc_urs3, cl::CommandQueue queue)
+{
+	calc_urs1.setArg(9, h);
+	calc_urs1.setArg(10, fT);
+
+	queue.enqueueNDRangeKernel(calc_urs1, cl::NullRange, cl::NDRange(1), cl::NullRange);
+
+	//queue.enqueueNDRangeKernel(calc_urs2, cl::NullRange, cl::NDRange(1), cl::NullRange);
+
+	//queue.enqueueNDRangeKernel(calc_urs3, cl::NullRange, cl::NDRange(1), cl::NullRange);
+	
+}
+/**
+ * Уравнение состояния смеси идеальных газов OpenCL
+ */
+void urs_mixt_OC(double* y_m, double h, double p, double fT, int flag, cl::Buffer buffer_y_m, cl::Buffer buffer_urs,
+	cl::Kernel calc_urs1, cl::Kernel calc_urs2, cl::Kernel calc_urs3, cl::CommandQueue queue);
